@@ -2,13 +2,15 @@ from collections import Counter
 
 import numpy as np
 import scipy.stats as st
+from sklearn.linear_model import SGDRegressor, SGDClassifier
+from sklearn.model_selection import train_test_split
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.metrics import matthews_corrcoef
+from sklearn.metrics import matthews_corrcoef, r2_score, f1_score
 
 from mindsdb.libs.constants.mindsdb import *
-
+from mindsdb.libs.helpers.text_helpers import clean_str_data_to_float_or_date
 
 
 def compute_value_distribution_score(stats, columns, col_name):
@@ -118,6 +120,7 @@ def compute_data_type_dist_score(stats, columns, col_name):
     This score indicates the amount of data that are not of the same data type as the most commonly detected data type in this column. Note, the most commonly occuring data type is not necessarily the type mindsdb will use to label the column when learning or predicting.
     """}
 
+
 def compute_z_score(stats, columns, col_name):
     """
     # Computes the z_score for each value in our column.
@@ -135,13 +138,15 @@ def compute_z_score(stats, columns, col_name):
     if stats[col_name]['data_type'] != DATA_TYPES.NUMERIC:
         return {}
 
-    z_scores = list(map(abs,(st.zscore(columns[col_name]))))
+    col_data = columns[col_name]
+
+    z_scores = list(map(abs,(st.zscore(col_data))))
     threshold = 3
     z_score_outlier_indexes = [i for i in range(len(z_scores)) if z_scores[i] > threshold]
     data = {
         'z_score_outliers': z_score_outlier_indexes
         ,'mean_z_score': round(10 * (1 - np.mean(z_scores)))
-        ,'z_test_based_outlier_score': round(10 * (1 - len(z_score_outlier_indexes)/len(columns[col_name])))
+        ,'z_test_based_outlier_score': round(10 * (1 - len(z_score_outlier_indexes)/len(col_data)))
         ,'z_test_based_outlier_score_description':"""
         This score indicates the amount of data that are 3 STDs or more away from the mean. That is to say, the amount of data that we consider to be an outlir. A hgih z socre means your data contains a large amount of outliers.
         """
@@ -201,8 +206,8 @@ def compute_similariy_score(stats, columns, col_name):
         else:
             # @TODO Figure out why computing matthews_corrcoef is so slow, possibly find a better implementation and replace it with that. Matthews corrcoef code was: similarity = matthews_corrcoef(list(map(str,col_data)), list(map(str,columns[other_col_name])))
             similarity = 0
-            X1 = list(map(str,col_data))
-            X2 = list(map(str,columns[other_col_name]))
+            X1 = list(map(str, col_data))
+            X2 = list(map(str, columns[other_col_name]))
             for ii in range(len(X1)):
                 if X1[ii] == X2[ii]:
                     similarity += 1
@@ -218,11 +223,11 @@ def compute_similariy_score(stats, columns, col_name):
         max_similarity = 0
 
     return {
-        'max_similarity': max_similarity
-        ,'similarities': similarities
-        ,'similarity_score': round(10 * (1 - max_similarity))
-        ,'most_similar_column_name': most_similar_column_name
-        ,'similarity_score_description':"""
+        'max_similarity': max_similarity,
+        'similarities': similarities,
+        'similarity_score': round(10 * (1 - max_similarity)),
+        'most_similar_column_name': most_similar_column_name,
+        'similarity_score_description': """
         This score is simple element-wise equality applied between this column and all other column.
         The score * 100 is the number of values which are similar in the column that is most similar to the scored column.
         """
@@ -261,25 +266,25 @@ def compute_clf_based_correlation_score(stats, columns, col_name):
 
         other_feature_names.append(other_col_name)
         le = LabelEncoder()
-        _stringified_col = list(map(str,columns[other_col_name]))
+        _stringified_col = list(map(str, columns[other_col_name]))
         le.fit(_stringified_col)
         other_features.append(list(le.transform(_stringified_col)))
 
     other_features_t = np.array(other_features, dtype=object).transpose()
 
     le = LabelEncoder()
-    _stringified_col = list(map(str,full_col_data))
+    _stringified_col = list(map(str, full_col_data))
     le.fit(_stringified_col)
     y = le.transform(_stringified_col)
-    dt_clf.fit(other_features_t,y)
-    prediction_score = dt_clf.score(other_features_t,y)
+    dt_clf.fit(other_features_t, y)
+    prediction_score = dt_clf.score(other_features_t, y)
     corr_scores = list(dt_clf.feature_importances_)
     highest_correlated_column = max(corr_scores)
     return {
         'correlation_score': round(10 * (1 - prediction_score * highest_correlated_column))
         ,'highest_correlation': max(corr_scores)
         ,'most_correlated_column': other_feature_names[corr_scores.index(max(corr_scores))]
-        ,'similarity_score_description':"""
+        ,'similarity_score_description': """
         A high value for this score means that two of your columns are highly similar. This is done by trying to predict one column using the other via a simple DT.
         """
     }
@@ -300,7 +305,7 @@ def compute_consistency_score(stats, col_name):
     else:
         consistency_score = (col_stats['data_type_distribution_score'] + col_stats['empty_cells_score'])/2
     return {'consistency_score': consistency_score
-    ,'consistency_score_description':"""
+        , 'consistency_score_description': """
     A high value for this score indicates that the data in a column is not very consistent, it's either missing a lot of valus or the type of values it has varries quite a lot (e.g. combination of strings, dates, integers and floats).
     The data consistency score is mainly based upon the Data Type Distribution Score and the Empty Cells Score, the Duplicates Score is also taken into account if present but with a smaller (2x smaller) bias.
     """}
@@ -371,3 +376,69 @@ def compute_data_quality_score(stats, col_name):
     ,'quality_score_description':"""
     The higher this score is, the lower the quality of a given column.
     """}
+
+
+def compute_predictive_power_score(stats, columns, col_name):
+    def to_user_friendly_score(score, metric='r2_score'):
+        if metric == 'r2_score':
+            score = max(score, 0)
+
+        # Map linearly:
+        # source score of 1 to 0 user friendly score
+        # 0 to 10
+        score = -1 * score
+        user_friendly_score = int(round(((score - (-1)) * (10 - 0)) / (0 - (-1))))
+        return user_friendly_score
+
+    max_predictive_power = None
+    max_predictive_power_col = None
+
+    model = SGDRegressor()
+    scoring_function = r2_score
+    scoring_function_name = 'r2_score'
+
+    y_dtype = stats[col_name]['data_type']
+    y_col = columns[col_name].values
+    if y_dtype == DATA_TYPES.CATEGORICAL:
+        y_label_encoder = LabelEncoder()
+        y_col = y_label_encoder.fit_transform(y_col)
+        model = SGDClassifier()
+        scoring_function = lambda y_true, y_pred: f1_score(y_true, y_pred,
+                                                           average='weighted')
+        scoring_function_name = 'f1_score'
+    for x_col_name in columns.columns:
+        if x_col_name == col_name:
+            continue
+        x_col = columns[x_col_name].values
+        x_dtype = stats[x_col_name]['data_type']
+
+        if x_dtype == DATA_TYPES.CATEGORICAL:
+            x_label_encoder = LabelEncoder()
+            x_col = x_label_encoder.fit_transform(x_col)
+        else:
+            # @Todo make sure already cleaned data is passed here
+            x_col = np.array(clean_str_data_to_float_or_date(x_col, keep_null=True))
+
+        x_train, x_test, y_train, y_test = train_test_split(x_col, y_col)
+        x_train, x_test = x_train.reshape(-1, 1), x_test.reshape(-1, 1)
+        model.fit(x_train, y_train)
+
+        y_pred = model.predict(x_test)
+        score = scoring_function(y_test, y_pred)
+
+        # R^2 can be negative, but in this case we are only interested if its >= 0
+        score = max(score, 0)
+
+        if not max_predictive_power or score > max_predictive_power:
+            max_predictive_power = score
+            max_predictive_power_col = x_col_name
+
+    predictive_power_score = to_user_friendly_score(max_predictive_power,
+                                                    metric=scoring_function_name)
+
+    return {
+        'max_predictive_power': max_predictive_power,
+        'max_predictive_power_col': max_predictive_power_col,
+        'predictive_power_score': predictive_power_score,
+        'predictive_power_score_description': 'blah blah',
+    }

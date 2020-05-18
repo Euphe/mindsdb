@@ -8,6 +8,7 @@ from collections import Counter
 #import multiprocessing
 
 import numpy as np
+import pandas as pd
 import scipy.stats as st
 from dateutil.parser import parse as parse_datetime
 from sklearn.metrics.pairwise import cosine_similarity
@@ -18,7 +19,8 @@ from PIL import Image
 from mindsdb.config import CONFIG
 from mindsdb.libs.constants.mindsdb import *
 from mindsdb.libs.phases.base_module import BaseModule
-from mindsdb.libs.helpers.text_helpers import splitRecursive, clean_float, cast_string_to_python_type
+from mindsdb.libs.helpers.text_helpers import (splitRecursive, clean_float,
+                                               clean_str_data_to_float_or_date)
 from mindsdb.libs.helpers.debugging import *
 from mindsdb.external_libs.stats import calculate_sample_size
 from mindsdb.libs.phases.stats_generator.scores import *
@@ -45,7 +47,7 @@ class StatsGenerator(BaseModule):
                 return False
             else:
                 return DATA_SUBTYPES.IMAGE
-        except:
+        except Exception:
             # Not a file or file doesn't exist
             return False
 
@@ -78,7 +80,7 @@ class StatsGenerator(BaseModule):
                 return DATA_SUBTYPES.DATE
             else:
                 return DATA_SUBTYPES.TIMESTAMP
-        except:
+        except Exception:
             return False
 
     def _get_text_type(self, data):
@@ -169,7 +171,7 @@ class StatsGenerator(BaseModule):
                         for ele in eles:
                             if not self._is_number(ele):
                                 all_nr = False
-                    except:
+                    except Exception:
                         all_nr = False
                         pass
                     if all_nr is True:
@@ -271,24 +273,6 @@ class StatsGenerator(BaseModule):
 
         return curr_data_type, curr_data_subtype, type_dist, subtype_dist, additional_info, 'Column ok'
 
-    @staticmethod
-    def clean_int_and_date_data(col_data):
-        cleaned_data = []
-
-        for value in col_data:
-            if value != '' and value != '\r' and value != '\n':
-                cleaned_data.append(value)
-
-        cleaned_data_new = []
-
-        for ele in cleaned_data:
-            if str(ele) not in ['', str(None), str(False), str(np.nan), 'NaN', 'nan', 'NA', 'null']:
-                try:
-                    cleaned_data_new.append(clean_float(ele))
-                except:
-                    cleaned_data_new.append(parse_datetime(str(ele)).timestamp())
-
-        return cleaned_data_new
 
     @staticmethod
     def get_words_histogram(data, is_full_text=False):
@@ -318,7 +302,7 @@ class StatsGenerator(BaseModule):
             is_full_text = True if data_subtype == DATA_SUBTYPES.TEXT else False
             return StatsGenerator.get_words_histogram(data, is_full_text), None
         elif data_type == DATA_TYPES.NUMERIC or data_subtype == DATA_SUBTYPES.TIMESTAMP:
-            data = StatsGenerator.clean_int_and_date_data(data)
+            data = clean_str_data_to_float_or_date(data)
             y, x = np.histogram(data, bins=50, range=(min(data),max(data)), density=False)
             x = x[:-1]
             #x = (x + np.roll(x, -1))[:-1] / 2.0 <--- original code, was causing weird bucket values when we had outliers
@@ -422,7 +406,7 @@ class StatsGenerator(BaseModule):
             # Overall quality
             if 'quality_score' in col_stats and col_stats['quality_score'] < 6:
                 # Some scores are not that useful on their own, so we should only warn users about them if overall quality is bad.
-                self.log.warning('Column "{}" is considered of low quality, the scores that influenced this decision will be listed below')
+                self.log.warning(f'Column "{col_name}" is considered of low quality, the scores that influenced this decision will be listed below')
                 if 'duplicates_score' in col_stats and col_stats['duplicates_score'] < 6:
                     duplicates_percentage = col_stats['duplicates_percentage']
                     w = f'{duplicates_percentage}% of the values in column {col_name} seem to be repeated, this might indicate that your data is of poor quality.'
@@ -520,7 +504,7 @@ class StatsGenerator(BaseModule):
             self.log.info(f"""Data distribution for column "{col_name}" of type "{stats[col_name]['data_type']}" and subtype  "{stats[col_name]['data_subtype']}""")
             try:
                 self.log.infoChart(stats[col_name]['data_subtype_dist'], type='list', uid='Data Type Distribution for column "{}"'.format(col_name))
-            except:
+            except Exception:
                 # Functionality is specific to mindsdb logger
                 pass
 
@@ -528,7 +512,7 @@ class StatsGenerator(BaseModule):
         """
         # Runs the stats generation phase
         # This shouldn't alter the columns themselves, but rather provide the `stats` metadata object and update the types for each column
-        # A lot of information about the data distribution and quality will  also be logged to the server in this phase
+        # A lot of information about the data distribution and quality will also be logged to the server in this phase
         """
 
         ''' @TODO Uncomment when we need multiprocessing, possibly disable on OSX
@@ -585,7 +569,7 @@ class StatsGenerator(BaseModule):
                     else:
                         try:
                             new_col_data.append(int(parse_datetime(element).timestamp()))
-                        except:
+                        except Exception:
                             self.log.warning(f'Could not convert string from col "{col_name}" to date and it was expected, instead got: {element}')
                             new_col_data.append(None)
                 col_data = new_col_data
@@ -594,7 +578,7 @@ class StatsGenerator(BaseModule):
                 x = histogram['x']
                 y = histogram['y']
 
-                col_data = StatsGenerator.clean_int_and_date_data(col_data)
+                col_data = clean_str_data_to_float_or_date(col_data)
                 # This means the column is all nulls, which we don't handle at the moment
                 if len(col_data) < 1:
                     return None
@@ -707,6 +691,10 @@ class StatsGenerator(BaseModule):
 
             col_data_dict[col_name] = col_data
 
+        # all_sampled_data is a dataframe,
+        # lets pass cleaned data as a dataframe too for consistency
+        col_data_df = pd.DataFrame(col_data_dict)
+        start_time = time.time()
         for col_name in all_sampled_data.columns:
             if col_name in self.transaction.lmd['columns_to_ignore']:
                 continue
@@ -723,29 +711,33 @@ class StatsGenerator(BaseModule):
                 score = score_promise.get()
                 stats[col_name].update(score)
 
-            for score_func in [compute_duplicates_score, compute_empty_cells_score, compute_data_type_dist_score, compute_z_score, compute_lof_score, compute_similariy_score, compute_value_distribution_score]:
-                start_time = time.time()
+            for score_func in [compute_duplicates_score,
+                               compute_empty_cells_score,
+                               compute_data_type_dist_score,
+                               compute_similariy_score,
+                               compute_value_distribution_score,
+                               ]:
+                stats[col_name].update(score_func(stats, all_sampled_data, col_name))
 
-                try:
-                    if 'compute_z_score' in str(score_func) or 'compute_lof_score' in str(score_func):
-                        stats[col_name].update(score_func(stats, col_data_dict, col_name))
-                    else:
-                        stats[col_name].update(score_func(stats, all_sampled_data, col_name))
-                except Exception as e:
-                    self.log.warning(e)
+            for score_func in [compute_z_score,
+                               compute_lof_score,
+                               compute_predictive_power_score,
+                               ]:
 
-                fun_name = str(score_func)
-                run_duration = round(time.time() - start_time, 2)
+                stats[col_name].update(score_func(stats, col_data_df, col_name))
 
-            for score_func in [compute_consistency_score, compute_redundancy_score, compute_variability_score, compute_data_quality_score]:
-                try:
-                    stats[col_name].update(score_func(stats, col_name))
-                except Exception as e:
-                    self.log.warning(e)
+            for score_func in [compute_consistency_score,
+                               compute_redundancy_score,
+                               compute_variability_score,
+                               compute_data_quality_score]:
+                stats[col_name].update(score_func(stats, col_name))
 
             stats[col_name]['is_foreign_key'] = self.is_foreign_key(col_name, stats[col_name], col_data_dict[col_name])
             if stats[col_name]['is_foreign_key'] and self.transaction.lmd['handle_foreign_keys']:
                 self.transaction.lmd['columns_to_ignore'].append(col_name)
+
+        run_duration = round(time.time() - start_time, 2)
+        self.log.debug(f'Dataset scores computed in {run_duration} seconds')
 
         total_rows = len(input_data.data_frame)
 
