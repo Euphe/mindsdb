@@ -1,11 +1,13 @@
 from collections import Counter
-
+import logging
 import numpy as np
+import pandas as pd
 import scipy.stats as st
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import SGDRegressor, SGDClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import LocalOutlierFactor
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler, OneHotEncoder
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import matthews_corrcoef, r2_score, f1_score
 
@@ -390,7 +392,7 @@ def compute_predictive_power_score(stats, columns, col_name):
         user_friendly_score = int(round(((score - (-1)) * (10 - 0)) / (0 - (-1))))
         return user_friendly_score
 
-    max_predictive_power = None
+    max_predictive_power = 0
     max_predictive_power_col = None
 
     model = SGDRegressor()
@@ -399,37 +401,49 @@ def compute_predictive_power_score(stats, columns, col_name):
 
     y_dtype = stats[col_name]['data_type']
     y_col = columns[col_name].values
+
+    # Only evaluate x and y pairs where both are non-null
+    valid_y_index = ~pd.isnull(y_col)
+    y_col = y_col[valid_y_index]
+
+    if sum(pd.isnull(y_col))/len(y_col) >= 0.3:
+        logging.warning('Column %s contains at least 30\% nan values, '
+                        'predictive power score might not be reliable', col_name)
+
     if y_dtype == DATA_TYPES.CATEGORICAL:
+        y_col[pd.isnull(y_col)] = 'NaN'
         y_label_encoder = LabelEncoder()
         y_col = y_label_encoder.fit_transform(y_col)
         model = SGDClassifier()
         scoring_function = lambda y_true, y_pred: f1_score(y_true, y_pred,
                                                            average='weighted')
         scoring_function_name = 'f1_score'
+
     for x_col_name in columns.columns:
         if x_col_name == col_name:
             continue
         x_col = columns[x_col_name].values
         x_dtype = stats[x_col_name]['data_type']
 
+        x_col = x_col[valid_y_index]
+        x_col = x_col.reshape(-1, 1)
         if x_dtype == DATA_TYPES.CATEGORICAL:
-            x_label_encoder = LabelEncoder()
+            x_col[pd.isnull(x_col)] = 'NaN'
+            x_label_encoder = OneHotEncoder()
             x_col = x_label_encoder.fit_transform(x_col)
         else:
-            # @Todo make sure already cleaned data is passed here
-            x_col = np.array(clean_str_data_to_float_or_date(x_col, keep_null=True))
-
+            x_col = SimpleImputer().fit_transform(x_col)
+            x_col = StandardScaler().fit_transform(x_col)
         x_train, x_test, y_train, y_test = train_test_split(x_col, y_col)
-        x_train, x_test = x_train.reshape(-1, 1), x_test.reshape(-1, 1)
         model.fit(x_train, y_train)
 
         y_pred = model.predict(x_test)
         score = scoring_function(y_test, y_pred)
 
-        # R^2 can be negative, but in this case we are only interested if its >= 0
+        # R^2 can be negative, but we are only interested if its >= 0
         score = max(score, 0)
 
-        if not max_predictive_power or score > max_predictive_power:
+        if score > max_predictive_power:
             max_predictive_power = score
             max_predictive_power_col = x_col_name
 
