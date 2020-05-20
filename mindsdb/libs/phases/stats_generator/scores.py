@@ -3,6 +3,7 @@ import logging
 import numpy as np
 import pandas as pd
 import scipy.stats as st
+from sklearn.feature_selection import SelectFromModel
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import SGDRegressor, SGDClassifier
 from sklearn.model_selection import train_test_split
@@ -380,7 +381,103 @@ def compute_data_quality_score(stats, col_name):
     """}
 
 
-def compute_predictive_power_score(stats, columns, col_name):
+def compute_predictive_power_score(stats, columns, col_name, combination_threshold=0.3):
+    """
+        # Attempts to
+
+        :param stats: The stats extracted up until this point for all columns
+        :param columns: All the columns
+        :param col_name: The name of the column we should compute the new stats for
+        :return: Dictioanry containing:
+
+    """
+
+    def validate_y(y_col, y_dtype):
+        if sum(pd.isnull(y_col)) / len(y_col) >= 0.3:
+            logging.warning('Column %s contains at least 30\% nan values, '
+                            'predictive power score might not be reliable',
+                            col_name)
+
+        if np.unique(y_col[~pd.isnull(y_col)]).shape[0] == 1:
+            return {
+                'predictive_power_score_description': f'Column contains only a single value, '
+                f'predictive power score not supported'
+            }
+
+        if y_dtype not in (DATA_TYPES.NUMERIC,
+                           DATA_TYPES.CATEGORICAL,
+                           DATA_TYPES.DATE):
+            return {
+                'predictive_power_score_description': f'Predictive power score for '
+                f'data type {y_dtype} not supported'
+            }
+
+        if y_dtype == DATA_TYPES.DATE:
+            y_subtype = stats[col_name]['data_subtype']
+            if y_subtype == DATA_SUBTYPES.DATE:
+                return {
+                    'predictive_power_score_description': f'Predictive power score for '
+                    f'data type {DATA_TYPES.DATE} not supported'
+                }
+
+    def preprocess_y(y_col, y_dtype):
+        # Only evaluate x and y pairs where both are non-null
+        non_null_index = ~pd.isnull(y_col)
+        y_col = y_col[non_null_index]
+
+        if y_dtype == DATA_TYPES.CATEGORICAL:
+            y_encoder = LabelEncoder()
+            y_col = y_encoder.fit_transform(y_col)
+            return y_col, non_null_index
+        elif y_dtype == DATA_TYPES.DATE:
+            # Attempt to convert timestamps to int
+            y_col = np.array([pd.to_datetime(y, infer_datetime_format=True).value for y in y_col])
+
+        y_col = StandardScaler().fit_transform(y_col.reshape(-1, 1)).flatten()
+        return y_col, non_null_index
+
+    def is_valid_x(x_col, x_dtype, x_subtype):
+        if np.unique(x_col[~pd.isnull(x_col)]).shape[0] == 1:
+            # Contains only a single value
+            return False
+
+        if ((x_dtype not in (DATA_TYPES.NUMERIC,
+                             DATA_TYPES.CATEGORICAL,
+                             DATA_TYPES.DATE))
+            or (x_dtype in DATA_TYPES.DATE and x_subtype == DATA_SUBTYPES.DATE)):
+            # Cant compute predictive power score
+            return False
+        return True
+
+    def preprocess_x(x_col, x_dtype):
+        if x_dtype == DATA_TYPES.CATEGORICAL:
+            x_col = x_col.astype(str)
+            x_col[pd.isnull(x_col)] = 'NaN'
+            x_encoder = LabelEncoder()
+            x_col = x_encoder.fit_transform(x_col).reshape(-1, 1)
+            return x_col
+
+        if x_dtype == DATA_TYPES.DATE:
+            # Attempt to convert timestamps to int
+            x_col = np.array([pd.to_datetime(x, infer_datetime_format=True).value
+                              for x in x_col.flatten()])\
+                .reshape(-1, 1)
+
+        x_col = SimpleImputer().fit_transform(x_col)
+        x_col = StandardScaler().fit_transform(x_col)
+        return x_col
+
+    def obtain_score(x_col, y_col, model_cls, scoring_function):
+        x_train, x_test, y_train, y_test = train_test_split(x_col, y_col)
+        model = model_cls()
+        model.fit(x_train, y_train)
+
+        y_pred = model.predict(x_test)
+        score = scoring_function(y_test, y_pred)
+        # R^2 can be negative, but we are only interested if its >= 0
+        score = max(score, 0)
+        return score
+
     def to_user_friendly_score(score, metric='r2_score'):
         if metric == 'r2_score':
             score = max(score, 0)
@@ -395,64 +492,59 @@ def compute_predictive_power_score(stats, columns, col_name):
     max_predictive_power = 0
     max_predictive_power_col = None
 
-    model = SGDRegressor()
-    scoring_function = r2_score
-    scoring_function_name = 'r2_score'
-
     y_dtype = stats[col_name]['data_type']
     y_col = columns[col_name].values
 
-    # Only evaluate x and y pairs where both are non-null
-    valid_y_index = ~pd.isnull(y_col)
-    y_col = y_col[valid_y_index]
+    result = validate_y(y_col, y_dtype)
+    if result:
+        return result
 
-    if sum(pd.isnull(y_col))/len(y_col) >= 0.3:
-        logging.warning('Column %s contains at least 30\% nan values, '
-                        'predictive power score might not be reliable', col_name)
+    y_col, non_null_index = preprocess_y(y_col, y_dtype)
 
+    model_cls = SGDRegressor
+    scoring_function = r2_score
+    scoring_function_name = 'r2_score'
     if y_dtype == DATA_TYPES.CATEGORICAL:
-        y_col[pd.isnull(y_col)] = 'NaN'
-        y_label_encoder = LabelEncoder()
-        y_col = y_label_encoder.fit_transform(y_col)
-        model = SGDClassifier()
+        model_cls = SGDClassifier
         scoring_function = lambda y_true, y_pred: f1_score(y_true, y_pred,
                                                            average='weighted')
         scoring_function_name = 'f1_score'
+
+    x_scores = {}
 
     for x_col_name in columns.columns:
         if x_col_name == col_name:
             continue
         x_col = columns[x_col_name].values
         x_dtype = stats[x_col_name]['data_type']
+        x_subtype = stats[x_col_name]['data_subtype']
 
-        x_col = x_col[valid_y_index]
+        if not is_valid_x(x_col, x_dtype, x_subtype):
+            continue
+
+        x_col = x_col[non_null_index]
         x_col = x_col.reshape(-1, 1)
-        if x_dtype == DATA_TYPES.CATEGORICAL:
-            x_col[pd.isnull(x_col)] = 'NaN'
-            x_label_encoder = OneHotEncoder()
-            x_col = x_label_encoder.fit_transform(x_col)
-        else:
-            x_col = SimpleImputer().fit_transform(x_col)
-            x_col = StandardScaler().fit_transform(x_col)
-        x_train, x_test, y_train, y_test = train_test_split(x_col, y_col)
-        model.fit(x_train, y_train)
 
-        y_pred = model.predict(x_test)
-        score = scoring_function(y_test, y_pred)
+        x_col = preprocess_x(x_col, x_dtype)
+        score = obtain_score(x_col, y_col, model_cls, scoring_function)
 
-        # R^2 can be negative, but we are only interested if its >= 0
-        score = max(score, 0)
-
+        x_scores[x_col_name] = score
         if score > max_predictive_power:
             max_predictive_power = score
             max_predictive_power_col = x_col_name
+    predictive_combination = [col_name for col_name, score in x_scores.items()
+                              if score >= combination_threshold]
 
-    predictive_power_score = to_user_friendly_score(max_predictive_power,
+    if max_predictive_power_col is None:
+        predictive_power_score = 10
+    else:
+        predictive_power_score = to_user_friendly_score(max_predictive_power,
                                                     metric=scoring_function_name)
 
     return {
         'max_predictive_power': max_predictive_power,
         'max_predictive_power_col': max_predictive_power_col,
         'predictive_power_score': predictive_power_score,
-        'predictive_power_score_description': 'blah blah',
+        'predictive_combination': predictive_combination,
+        'predictive_power_score_description': 'A high value for this score means that two of your columns can be inferred from eachother. This is done by trying to predict one column using the other via a simple linear model.',
     }
