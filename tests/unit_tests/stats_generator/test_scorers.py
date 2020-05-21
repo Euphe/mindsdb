@@ -190,7 +190,6 @@ class TestPredictivePowerScore:
         output = compute_predictive_power_score(stats, columns, 'y')
         np.testing.assert_allclose(output['max_predictive_power'], 0, atol=0.1)
         assert output['predictive_power_score'] >= 9
-        assert output['max_predictive_power_col'] == 'x'
         assert output['predictive_power_score_description']
 
     @mark.parametrize(*test_x_column_data)
