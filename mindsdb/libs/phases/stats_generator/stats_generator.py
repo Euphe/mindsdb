@@ -371,7 +371,8 @@ class StatsGenerator(BaseModule):
                 is_same_length = False
 
                 for char in str(val):
-                    if char not in ['0', '1','2','3','4','5','6','7','8','9','a','b','c','d','e','f','-']:
+                    if char not in ['0', '1', '2', '3', '4', '5', '6', '7', '8',
+                                    '9', 'a', 'b', 'c', 'd', 'e', 'f', '-']:
                         is_uuid = False
 
                 if val_length is not False:
@@ -393,7 +394,6 @@ class StatsGenerator(BaseModule):
                 foreign_key_name = True
 
         return foreign_key_name and (foregin_key_type or data_looks_like_id)
-
 
     def _log_interesting_stats(self, stats):
         """
@@ -417,7 +417,7 @@ class StatsGenerator(BaseModule):
             else:
                 col_stats['duplicates_score_warning'] = None
 
-            #Compound scores
+            # Compound scores
             if 'consistency_score' in col_stats and  col_stats['consistency_score'] < 3:
                 w = f'The values in column {col_name} rate poorly in terms of consistency. This means that the data has too many empty values, values with a hard to determine type and duplicate values. Please see the detailed logs below for more info'
                 self.log.warning(w)
@@ -425,14 +425,14 @@ class StatsGenerator(BaseModule):
             else:
                 col_stats['consistency_score_warning'] = None
 
-            if 'redundancy_score' in col_stats and  col_stats['redundancy_score'] < 5:
+            if 'redundancy_score' in col_stats and col_stats['redundancy_score'] < 5:
                 w = f'The data in the column {col_name} is likely somewhat redundant, any insight it can give us can already by deduced from your other columns. Please see the detailed logs below for more info'
                 self.log.warning(w)
                 col_stats['redundancy_score_warning'] = w
             else:
                 col_stats['redundancy_score_warning'] = None
 
-            if 'variability_score' in col_stats and  col_stats['variability_score'] < 6:
+            if 'variability_score' in col_stats and col_stats['variability_score'] < 6:
                 w = f'The data in the column {col_name} seems to contain too much noise/randomness based on the value variability. That is to say, the data is too unevenly distributed and has too many outliers. Please see the detailed logs below for more info.'
                 self.log.warning(w)
                 col_stats['variability_score_warning'] = w
@@ -474,6 +474,20 @@ class StatsGenerator(BaseModule):
                 col_stats['lof_based_outlier_score_warning'] = w
             else:
                 col_stats['lof_based_outlier_score_warning'] = None
+
+            if 'predictive_power_score' in col_stats and col_stats['predictive_power_score'] < 6:
+                max_predictive_power_col = col_stats['max_predictive_power_col']
+                predictive_combination = col_stats['predictive_combination']
+                w = f"""Column {col_name} appears to be easy to infer from"""
+                if predictive_combination != [max_predictive_power_col]:
+                    w += f" columns {', '.join(predictive_combination)}."
+                else:
+                    w += f" column {max_predictive_power_col}."
+                w += " This might indicate the column carries little new inforamtion and is redudant."
+
+                col_stats['predictive_power_score_warning'] = w
+            else:
+                col_stats['predictive_power_score_warning'] = None
 
             if 'value_distribution_score' in col_stats and col_stats['value_distribution_score'] < 3:
                 max_probability_key = col_stats['max_probability_key']

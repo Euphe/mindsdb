@@ -381,15 +381,30 @@ def compute_data_quality_score(stats, col_name):
     """}
 
 
-def compute_predictive_power_score(stats, columns, col_name, combination_threshold=0.3):
+def compute_predictive_power_score(stats, columns, col_name,
+                                   combination_threshold=0.3):
     """
-        # Attempts to
+        # Attempts to estimate if the column `col_name` can be predicted using
+        other columns, by fitting SGDRegressor and SGDClassifier on each valid pair of columns.
+        If the column can be predicted from other columns, it likely carries
+        no useful information.
 
         :param stats: The stats extracted up until this point for all columns
         :param columns: All the columns
         :param col_name: The name of the column we should compute the new stats for
+        :param combination_threshold: column names, for which obtained score is
+            greater than this value will be included in `predictive_combination` (see return).
         :return: Dictioanry containing:
-
+            max_predictive_power: maximum score obtained by trying to predict this column from other columns.
+                r2_score in case the column is numeric, f1_score in case the column is categorical.
+            max_predictive_power_col: the column, for which maximum score was obtained.
+                Can be None, if no column with score >= 0 was found.
+            predictive_power_score: user-friendly score on a range from 0 to 10,
+                where 10 indicates that the column can't be inferred from other columns,
+                0 indicates that the column is easy to obtain from other columns (max_predictive_power ~ 1.0).
+            predictive_combination: list of columns, for which obtained scores are
+                above `combination_threshold`.
+            predictive_power_score_description: description.
     """
 
     def validate_y(y_col, y_dtype):
