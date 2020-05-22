@@ -389,9 +389,11 @@ class StatsGenerator(BaseModule):
         for endings in ['-id', '_id', 'ID', 'Id']:
             if column_name.endswith(endings):
                 foreign_key_name = True
+                break
         for keyword in ['account', 'uuid', 'identifier', 'user']:
             if keyword in column_name:
                 foreign_key_name = True
+                break
 
         return foreign_key_name and (foregin_key_type or data_looks_like_id)
 

@@ -403,3 +403,26 @@ class TestPredictivePowerScore:
         assert output['predictive_power_score'] <= 8
         assert output['predictive_power_score_description']
         assert output['predictive_combination'] == ['x', 'x1']
+
+    def test_large_dataset(self):
+        """y is Numeric, y is linearly dependent on x and x1, x2 .. x150 are useless columns"""
+        stats, columns = get_stats_columns(y_dtype=DATA_TYPES.NUMERIC,
+                                           y_subtype=DATA_SUBTYPES.FLOAT,
+                                           x_dtype=DATA_TYPES.NUMERIC,
+                                           x_subtype=DATA_SUBTYPES.FLOAT,
+                                           x_data=np.linspace(0, 1000, 1000))
+        stats['x1'] = stats['x']
+
+        for i in range(2, 151):
+            stats[f'x{i}'] = stats['x']
+            columns[f'x{i}'] = np.random.rand(len(columns))*columns.x.astype(float).mean()
+
+        columns['x1'] = columns.x.astype(float).mean() * np.random.rand(len(columns))
+        columns['y'] = 0.7 * columns.x.astype(float) + columns.x1
+
+        output = compute_predictive_power_score(stats, columns, 'y')
+
+        np.testing.assert_allclose(output['max_predictive_power'], 0.5, atol=0.4)
+        assert output['predictive_power_score'] <= 8
+        assert output['max_predictive_power_col'] == 'x'
+        assert output['predictive_power_score_description']

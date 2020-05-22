@@ -383,19 +383,24 @@ def compute_data_quality_score(stats, col_name):
 
 
 def compute_predictive_power_score(stats, columns, col_name,
-                                   mi_threshold=0.1):
+                                   mi_threshold=0.1,
+                                   big_dataset_columns_threshold=100
+                                   ):
     """
         # Attempts to estimate if the column `col_name` can be predicted using
-        other columns, by fitting SGDRegressor and SGDClassifier on each valid pair of columns.
+        other columns, by fitting SGDRegressor or SGDClassifier on each valid pair of columns.
         If the column can be predicted from other columns, it likely carries
         no useful information.
 
         :param stats: The stats extracted up until this point for all columns
         :param columns: All the columns
         :param col_name: The name of the column we should compute the new stats for
-        :param mi_threshold: columns, for which mutual information is less than this value,
-            will not be included in predictive combination and models will not be fitted
-            to pairs including them.
+        :param mi_threshold: Columns, for which mutual information is less than this value,
+            will not be included in `predictive_combination` and models will not be fitted
+            to pairs including them, as they are clearly independent.
+        :big_dataset_columns_threshold: If dataset contains >= columns than this value,
+            mutual information is not used, `predictive_combination` is not computed and
+            various heuristics for large datasets are used.
         :return: Dictioanry containing:
             max_predictive_power: maximum score obtained by trying to predict this column from other columns.
                 r2_score in case the column is numeric, f1_score in case the column is categorical.
@@ -404,14 +409,15 @@ def compute_predictive_power_score(stats, columns, col_name,
             predictive_power_score: user-friendly score on a range from 0 to 10,
                 where 10 indicates that the column can't be inferred from other columns,
                 0 indicates that the column is easy to obtain from other columns (max_predictive_power ~ 1.0).
-            predictive_combination: list of columns, for which obtained scores are
-                above `combination_threshold`.
+            predictive_combination: list of columns, for which the computed
+                mutual information is above `mi_threshold`. Only provided for
+                datasets with columns <= `big_dataset_columns_threshold`.
             predictive_power_score_description: description.
     """
 
     def validate_y(y_col, y_dtype):
         if sum(pd.isnull(y_col)) / len(y_col) >= 0.3:
-            logging.warning('Column %s contains at least 30\% nan values, '
+            logging.warning('Column %s contains >= 30%% nan values, '
                             'predictive power score might not be reliable',
                             col_name)
 
@@ -438,7 +444,7 @@ def compute_predictive_power_score(stats, columns, col_name,
                 }
 
     def preprocess_y(y_col, y_dtype):
-        # Only evaluate x and y pairs where both are non-null
+        # Only evaluate x and y pairs where y is non-null
         non_null_index = ~pd.isnull(y_col)
         y_col = y_col[non_null_index]
 
@@ -461,7 +467,7 @@ def compute_predictive_power_score(stats, columns, col_name,
         if ((x_dtype not in (DATA_TYPES.NUMERIC,
                              DATA_TYPES.CATEGORICAL,
                              DATA_TYPES.DATE))
-            or (x_dtype in DATA_TYPES.DATE and x_subtype == DATA_SUBTYPES.DATE)):
+            or (x_dtype == DATA_TYPES.DATE and x_subtype == DATA_SUBTYPES.DATE)):
             # Cant compute predictive power score
             return False
         return True
@@ -484,7 +490,7 @@ def compute_predictive_power_score(stats, columns, col_name,
         x_col = StandardScaler().fit_transform(x_col)
         return x_col
 
-    def obtain_mutual_information(X_data, y_col, y_dtype):
+    def get_mutual_information(X_data, y_col, y_dtype):
         mi_func = mutual_info_regression
         if y_dtype == DATA_TYPES.CATEGORICAL:
             mi_func = mutual_info_classif
@@ -492,16 +498,16 @@ def compute_predictive_power_score(stats, columns, col_name,
         mi = mi_func(X_data, y_col)
         return mi
 
-    def obtain_score(x_col, y_col, y_dtype):
-        model_cls = SGDRegressor
-        scoring_function = r2_score
+    def get_score(x_col, y_col, y_dtype):
         if y_dtype == DATA_TYPES.CATEGORICAL:
-            model_cls = SGDClassifier
+            model = SGDClassifier()
             scoring_function = lambda y_true, y_pred: f1_score(y_true, y_pred,
                                                                average='weighted')
+        else:
+            model = SGDRegressor()
+            scoring_function = r2_score
 
         x_train, x_test, y_train, y_test = train_test_split(x_col, y_col)
-        model = model_cls()
         model.fit(x_train, y_train)
 
         y_pred = model.predict(x_test)
@@ -511,11 +517,8 @@ def compute_predictive_power_score(stats, columns, col_name,
         return score
 
     def to_user_friendly_score(score):
-        # Map linearly:
-        # source score of 1 to 0 user friendly score
-        # 0 to 10
-        score = -1 * score
-        user_friendly_score = int(round(((score - (-1)) * (10 - 0)) / (0 - (-1))))
+        # Map source score of 1 to 0 user friendly score, 0 to 10
+        user_friendly_score = int(round((-1*score +1) * 10))
         return user_friendly_score
 
     max_predictive_power = 0
@@ -547,29 +550,29 @@ def compute_predictive_power_score(stats, columns, col_name,
 
         x_preprocessed[x_col_name] = preprocess_x(x_col, x_dtype)
 
-    if x_preprocessed:
-        x_data_df = pd.DataFrame(np.hstack(list(x_preprocessed.values())),
-                                                    columns=list(x_preprocessed.keys()),
-                                                    index=range(len(y_col)))
-        mi = obtain_mutual_information(x_data_df, y_col, y_dtype)
+    # For large datasets Dd not compute mutual information and
+    # dont obtain predictive combinations, it's slow
+    if x_preprocessed and columns.shape[1] <= big_dataset_columns_threshold:
+        mutual_information = get_mutual_information(np.hstack(list(x_preprocessed.values())),
+                                    y_col, y_dtype)
 
-        predictive_columns = list(x_data_df.columns[mi >= mi_threshold])
+        predictive_columns = [col for i, col in enumerate(x_preprocessed.keys())
+                              if mutual_information[i] >= mi_threshold]
 
-    x_scores = {}
     for x_col_name in x_preprocessed:
-        if x_col_name == col_name:
-            continue
-
         # No need to fit models to columns with mutual information below threshold
-        if x_col_name not in predictive_columns:
+        if x_col_name == col_name or (predictive_columns and x_col_name not in predictive_columns):
             continue
 
-        score = obtain_score(x_preprocessed[x_col_name], y_col, y_dtype)
-
-        x_scores[x_col_name] = score
+        score = get_score(x_preprocessed[x_col_name], y_col, y_dtype)
         if score > max_predictive_power:
             max_predictive_power = score
             max_predictive_power_col = x_col_name
+
+        if score >= 0.7 and columns.shape[1] >= big_dataset_columns_threshold:
+            # If the dataset is large and a sufficiently correlated column had been found,
+            # we can stop searching
+            break
 
     if max_predictive_power_col is None:
         predictive_power_score = 10
@@ -581,5 +584,6 @@ def compute_predictive_power_score(stats, columns, col_name,
         'max_predictive_power_col': max_predictive_power_col,
         'predictive_power_score': predictive_power_score,
         'predictive_combination': predictive_columns,
-        'predictive_power_score_description': 'A high value for this score means that two of your columns can be inferred from eachother. This is done by trying to predict one column using the other via a simple linear model.',
+        'predictive_power_score_description': 'A low value means that two of your columns can be inferred from eachother. '
+                                              'The score is obtained by trying to predict one column from another using a simple linear model.',
     }
